@@ -52,6 +52,28 @@ type AuthConfig struct {
 	RegistryToken string `json:"registrytoken,omitempty"`
 }
 
+// See https://docs.microsoft.com/en-us/azure/container-instances/container-instances-quotas for valid regions.
+var validAciRegions = []string{
+	"westeurope",
+	"westus",
+	"eastus",
+	"southeastasia",
+}
+
+// isValidACIRegion checks to make sure we're using a valid ACI region
+func isValidACIRegion(region string) bool {
+	regionLower := strings.ToLower(region)
+	regionTrimmed := strings.Replace(regionLower, " ", "", -1)
+
+	for _, validRegion := range validAciRegions {
+		if regionTrimmed == validRegion {
+			return true
+		}
+	}
+
+	return false
+}
+
 // NewACIProvider creates a new ACIProvider.
 func NewACIProvider(config string, rm *manager.ResourceManager, nodeName, operatingSystem string, internalIP string, daemonEndpointPort int32) (*ACIProvider, error) {
 	var p ACIProvider
@@ -138,6 +160,12 @@ func NewACIProvider(config string, rm *manager.ResourceManager, nodeName, operat
 	}
 	if p.region == "" {
 		return nil, errors.New("Region can not be empty please set ACI_REGION")
+	}
+	if r := p.region; !isValidACIRegion(r) {
+		unsupportedRegionMessage := fmt.Sprintf("Region %s is invalid. Current supported regions are: %s",
+			r, strings.Join(validAciRegions, ", "))
+
+		return nil, errors.New(unsupportedRegionMessage)
 	}
 
 	// Set sane defaults for Capacity in case config is not supplied
@@ -415,12 +443,20 @@ func (p *ACIProvider) getImagePullSecrets(pod *v1.Pod) ([]aci.ImageRegistryCrede
 		if secret == nil {
 			return nil, fmt.Errorf("error getting image pull secret")
 		}
-		// TODO: Check if secret type is v1.SecretTypeDockercfg and use DockerConfigKey instead of hardcoded value
-		// TODO: Check if secret type is v1.SecretTypeDockerConfigJson and use DockerConfigJsonKey to determine if it's in json format
-		// TODO: Return error if it's not one of these two types
-		repoData, ok := secret.Data[".dockercfg"]
+
+		var secretConfigKey v1.SecretType
+
+		switch secret.Type {
+		case v1.SecretTypeDockercfg:
+			secretConfigKey = v1.DockerConfigKey
+		case v1.SecretTypeDockerConfigJson:
+			secretConfigKey = v1.DockerConfigJsonKey
+		}
+
+		repoData, ok := secret.Data[string(secretConfigKey)]
+
 		if !ok {
-			return ips, fmt.Errorf("no dockercfg present in secret")
+			return ips, fmt.Errorf("no dockercfg or dockerconfigjson present in secret")
 		}
 
 		var authConfigs map[string]AuthConfig
@@ -508,7 +544,7 @@ func (p *ACIProvider) getVolumes(pod *v1.Pod) ([]aci.Volume, error) {
 			}
 
 			if secret == nil {
-				return nil, fmt.Errorf("Getting secret for AzureFile volume returned an empty secret.")
+				return nil, fmt.Errorf("Getting secret for AzureFile volume returned an empty secret")
 			}
 
 			volumes = append(volumes, aci.Volume{
